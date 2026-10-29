@@ -12,7 +12,6 @@ BASE_URL = "https://hapi.fhir.org/baseR4"
 TIMEOUT = 25
 KBV_PROFILE = "https://fhir.kbv.de/StructureDefinition/KBV_PR_Base_Patient"
 
-# --- Extension URLs used by the German base profile --------------------------
 EXT_NAMENSZUSATZ = "http://fhir.de/StructureDefinition/humanname-namenszusatz"
 EXT_NACHNAME = "http://hl7.org/fhir/StructureDefinition/humanname-own-name"
 EXT_VORSATZWORT = "http://hl7.org/fhir/StructureDefinition/humanname-own-prefix"
@@ -38,7 +37,6 @@ USE = {"home": "home", "work": "work", "temp": "temporary", "old": "old",
 ADDR_TYPE = {"postal": "postal address", "physical": "street address",
              "both": "postal and street address"}
 
-# --- Farben / Fonts ----------------------------------------------------------
 BG, CARD, ACCENT, TITLE, MUTED = "#f4f6f8", "#ffffff", "#0b78c4", "#e3c164", "#6b7280"
 F_BASE = ("Segoe UI", 10)
 F_BOLD = ("Segoe UI", 10, "bold")
@@ -46,14 +44,10 @@ F_HEAD = ("Segoe UI", 11, "bold")
 F_TITLE = ("Segoe UI", 16, "bold")
 
 
-# =============================================================================
-# FHIR-Zugriff
-# =============================================================================
 class FhirError(Exception):
     pass
 
 def fhir_get(path: str) -> dict:
-    """Fuehrt einen FHIR-GET aus und gibt die JSON-Ressource zurueck."""
     req = urllib.request.Request(
         f"{BASE_URL}/{path}",
         headers={"Accept": "application/fhir+json", "User-Agent": "CHEE/0.1"},
@@ -79,7 +73,6 @@ def fhir_get(path: str) -> dict:
 
 
 def lookup(query: str):
-    """Fetch a patient by ID or search for patients by name."""
     query = query.strip()
     if not query:
         bundle = fhir_get("Patient?_count=20&_sort=-_lastUpdated")
@@ -103,9 +96,6 @@ def _from_bundle(bundle: dict):
             if e.get("resource", {}).get("resourceType") == "Patient"]
 
 
-# =============================================================================
-# Patient data mapping (KBV_PR_Base_Patient)
-# =============================================================================
 def ext_value(el: dict, url: str):
     for e in (el or {}).get("extension", []):
         if e.get("url") == url:
@@ -116,7 +106,6 @@ def ext_value(el: dict, url: str):
 
 
 def mapped_text(mapping: dict[str, str], value):
-    """Liefert die Bezeichnung fuer einen optionalen FHIR-Code."""
     return mapping.get(value, value) if isinstance(value, str) else value
 
 
@@ -189,10 +178,8 @@ def display_name(p: dict):
 
 
 def build_sections(p: dict):
-    """Return sections of labelled values for the patient profile view."""
     sections = []
 
-    # Demographic data ---------------------------------------------------------
     gender = mapped_text(GENDER, p.get("gender"))
     amtlich = ext_value(p.get("_gender", {}), EXT_GENDER_AMTLICH)
     if isinstance(amtlich, dict):
@@ -224,20 +211,16 @@ def build_sections(p: dict):
         ("Marital status", marital_txt),
     ]))
 
-    # Names --------------------------------------------------------------------
     for i, n in enumerate(p.get("name", []), 1):
         sections.append((f"Name {i}" if len(p["name"]) > 1 else "Name", name_rows(n)))
 
-    # Identifiers ---------------------------------------------------------------
     ids = [(identifier_label(i), i.get("value")) for i in p.get("identifier", [])]
     if ids:
         sections.append(("Identifiers", ids))
 
-    # Addresses -----------------------------------------------------------------
     for i, a in enumerate(p.get("address", []), 1):
         sections.append((f"Address {i}" if len(p["address"]) > 1 else "Address", address_rows(a)))
 
-    # Contact details -----------------------------------------------------------
     tel = []
     for t in p.get("telecom", []):
         use = mapped_text(USE, t.get("use"))
@@ -246,7 +229,6 @@ def build_sections(p: dict):
     if tel:
         sections.append(("Contact details", tel))
 
-    # Contact persons -----------------------------------------------------------
     for i, c in enumerate(p.get("contact", []), 1):
         rows = []
         if c.get("name"):
@@ -256,7 +238,6 @@ def build_sections(p: dict):
             rows.append((mapped_text(TELECOM, t.get("system")) or "Contact", t.get("value")))
         sections.append((f"Contact person {i}", rows))
 
-    # Communication -------------------------------------------------------------
     comm = []
     for c in p.get("communication", []):
         lang = code_text(c.get("language"))
@@ -265,7 +246,6 @@ def build_sections(p: dict):
     if comm:
         sections.append(("Communication", comm))
 
-    # Metadata ------------------------------------------------------------------
     meta = p.get("meta", {})
     profiles = meta.get("profile", [])
     kbv = any(pr.startswith(KBV_PROFILE) for pr in profiles)
@@ -280,7 +260,6 @@ def build_sections(p: dict):
 
 
 def conformity_hints(p: dict):
-    """Check the required fields of the profile (name 1..*, birthDate 1..1)."""
     hints = []
     if not p.get("name"):
         hints.append("name ✘ missing")
@@ -289,9 +268,6 @@ def conformity_hints(p: dict):
     return hints
 
 
-# =============================================================================
-# GUI
-# =============================================================================
 class ScrollFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -336,7 +312,6 @@ class Chase(tk.Tk):
         self._build()
         self._show_welcome()
 
-    # -- Layout ----------------------------------------------------------------
     def _style(self):
         s = ttk.Style(self)
         try:
@@ -396,7 +371,6 @@ class Chase(tk.Tk):
         self.status = tk.StringVar(value="Bereit.")
         ttk.Label(self, textvariable=self.status, foreground=MUTED, padding=(16, 2, 16, 8)).pack(fill="x")
 
-    # -- Fetch (background thread keeps the GUI responsive) ---------------------
     def start_lookup(self):
         if self._busy:
             return
@@ -432,7 +406,6 @@ class Chase(tk.Tk):
         else:
             self._show_empty("No patients found.")
 
-    # -- Anzeige ---------------------------------------------------------------
     def on_select(self, _):
         sel = self.tree.selection()
         if sel:
@@ -450,7 +423,6 @@ class Chase(tk.Tk):
         self.profile.clear()
         parent = self.profile.inner
 
-        # Kopfkarte
         top = tk.Frame(parent, bg=CARD, highlightbackground="#dfe3e8", highlightthickness=1)
         top.pack(fill="x", padx=8, pady=(8, 4))
         tk.Label(top, text=display_name(p), font=F_TITLE, bg=CARD, anchor="w").pack(fill="x", padx=14, pady=(10, 0))
