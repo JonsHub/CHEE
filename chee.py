@@ -2,15 +2,18 @@ import json
 import re
 import threading
 import tkinter as tk
-import urllib.error
-import urllib.parse
-import urllib.request
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
+from fhir_client import KBV_PROFILE
 
-BASE_URL = "https://hapi.fhir.org/baseR4"
-TIMEOUT = 25
-KBV_PROFILE = "https://fhir.kbv.de/StructureDefinition/KBV_PR_Base_Patient"
+from fhir_client import (
+    BASE_URL,
+    FhirError,
+    create_patient,
+    lookup,
+    search_patients,
+    update_patient,
+)
 
 EXT_NAMENSZUSATZ = "http://fhir.de/StructureDefinition/humanname-namenszusatz"
 EXT_NACHNAME = "http://hl7.org/fhir/StructureDefinition/humanname-own-name"
@@ -42,58 +45,6 @@ F_BASE = ("Segoe UI", 10)
 F_BOLD = ("Segoe UI", 10, "bold")
 F_HEAD = ("Segoe UI", 11, "bold")
 F_TITLE = ("Segoe UI", 16, "bold")
-
-
-class FhirError(Exception):
-    pass
-
-def fhir_get(path: str) -> dict:
-    req = urllib.request.Request(
-        f"{BASE_URL}/{path}",
-        headers={"Accept": "application/fhir+json", "User-Agent": "CHEE/0.1"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-            if not isinstance(payload, dict) or not payload.get("resourceType"):
-                raise FhirError("The server returned an invalid FHIR resource.")
-            return payload
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            oo = json.loads(e.read().decode("utf-8"))
-            detail = oo["issue"][0].get("diagnostics") or oo["issue"][0].get("details", {}).get("text", "")
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-            pass
-        raise FhirError(f"HTTP {e.code} {e.reason}" + (f" – {detail}" if detail else "")) from e
-    except urllib.error.URLError as e:
-        raise FhirError(f"Server is unreachable: {e.reason}") from e
-    except TimeoutError as e:
-        raise FhirError("The request timed out.") from e
-
-
-def lookup(query: str):
-    query = query.strip()
-    if not query:
-        bundle = fhir_get("Patient?_count=20&_sort=-_lastUpdated")
-        return _from_bundle(bundle), "Latest patients"
-    if re.fullmatch(r"[A-Za-z0-9\-.]{1,64}", query):
-        try:
-            res = fhir_get(f"Patient/{urllib.parse.quote(query)}")
-            if res.get("resourceType") == "Patient":
-                return [res], f"Patient/{query} loaded"
-        except FhirError as e:
-            if not any(code in str(e) for code in ("404", "410")):
-                raise
-    bundle = fhir_get(f"Patient?name={urllib.parse.quote(query)}&_count=20")
-    return _from_bundle(bundle), f"Name search: {query!r}"
-
-
-def _from_bundle(bundle: dict):
-    if bundle.get("resourceType") != "Bundle":
-        raise FhirError("The search response was not a FHIR Bundle.")
-    return [e["resource"] for e in bundle.get("entry", [])
-            if e.get("resource", {}).get("resourceType") == "Patient"]
 
 
 def ext_value(el: dict, url: str):
@@ -337,14 +288,17 @@ class Chase(tk.Tk):
 
         bar = ttk.Frame(self, padding=(16, 6, 16, 8))
         bar.pack(fill="x")
-        ttk.Label(bar, text="Patient ID or name:").pack(side="left")
-        self.entry = ttk.Entry(bar, width=42, font=F_BASE)
-        self.entry.pack(side="left", padx=10, ipady=3)
-        self.entry.bind("<Return>", lambda e: self.start_lookup())
-        self.entry.focus_set()
-        self.btn = ttk.Button(bar, text="Fetch", style="Accent.TButton", command=self.start_lookup)
-        self.btn.pack(side="left")
-        ttk.Label(bar, text="empty = latest patients", foreground=MUTED).pack(side="left", padx=10)
+        ttk.Label(bar, text="Action:").pack(side="left")
+        self.mode = tk.StringVar(value="Fetch")
+        mode_box = ttk.Combobox(
+            bar, textvariable=self.mode, state="readonly",
+            values=("Fetch", "Create", "Update", "Filter"), width=12
+        )
+        mode_box.pack(side="left", padx=(8, 18))
+        mode_box.bind("<<ComboboxSelected>>", self._change_mode)
+        self.form = ttk.Frame(self, padding=(16, 0, 16, 8))
+        self.form.pack(fill="x")
+        self._change_mode()
 
         paned = ttk.PanedWindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=16, pady=(0, 6))
@@ -368,8 +322,59 @@ class Chase(tk.Tk):
         right.add(self.json_box, text="  JSON  ")
         paned.add(right, weight=4)
 
-        self.status = tk.StringVar(value="Bereit.")
+        self.status = tk.StringVar(value="Ready.")
         ttk.Label(self, textvariable=self.status, foreground=MUTED, padding=(16, 2, 16, 8)).pack(fill="x")
+
+    def _change_mode(self, _event=None):
+        for widget in self.form.winfo_children():
+            widget.destroy()
+        self.form_entries = {}
+        mode = self.mode.get()
+        if mode == "Fetch":
+            self._field("Patient ID or name", "query", width=42)
+            self._button("Fetch", self.start_lookup)
+            ttk.Label(self.form, text="empty = latest patients", foreground=MUTED).pack(side="left", padx=10)
+            self.form_entries["query"].focus_set()
+        elif mode == "Filter":
+            for label, key in (("Name", "name"), ("Gender", "gender"),
+                               ("Birth date / year", "birthdate"), ("Identifier", "identifier")):
+                self._field(label, key, width=16)
+            self._button("Search filters", self.start_filter)
+        else:
+            for label, key in (("Family name", "family"), ("Given name", "given"),
+                               ("Birth date (YYYY-MM-DD)", "birth_date"), ("Gender", "gender")):
+                self._field(label, key, width=18)
+            self._button("Create patient" if mode == "Create" else "Update patient",
+                         self.start_mutation)
+            if mode == "Update":
+                ttk.Label(self.form, text="Select a patient first.", foreground=MUTED).pack(side="left", padx=10)
+                self._populate_update_form()
+
+    def _field(self, label, key, width=18):
+        ttk.Label(self.form, text=f"{label}:").pack(side="left", padx=(0, 4))
+        entry = ttk.Entry(self.form, width=width)
+        entry.pack(side="left", padx=(0, 10), ipady=2)
+        self.form_entries[key] = entry
+
+    def _button(self, text, command):
+        self.btn = ttk.Button(self.form, text=text, style="Accent.TButton", command=command)
+        self.btn.pack(side="left")
+
+    def _populate_update_form(self):
+        selected = self.tree.selection() if hasattr(self, "tree") else ()
+        if not selected or self.mode.get() != "Update":
+            return
+        patient = self.patients.get(selected[0], {})
+        name = (patient.get("name") or [{}])[0]
+        values = {
+            "family": name.get("family", ""),
+            "given": " ".join(name.get("given", [])),
+            "birth_date": patient.get("birthDate", ""),
+            "gender": patient.get("gender", ""),
+        }
+        for key, value in values.items():
+            self.form_entries[key].delete(0, "end")
+            self.form_entries[key].insert(0, value)
 
     def start_lookup(self):
         if self._busy:
@@ -377,8 +382,40 @@ class Chase(tk.Tk):
         self._busy = True
         self.btn.state(["disabled"])
         self.status.set("Lade …")
-        query = self.entry.get()
+        query = self.form_entries["query"].get()
         threading.Thread(target=self._worker, args=(query,), daemon=True).start()
+
+    def start_filter(self):
+        if self._busy:
+            return
+        self._busy = True
+        self.btn.state(["disabled"])
+        filters = {key: entry.get() for key, entry in self.form_entries.items()}
+        self.status.set("Searching …")
+        threading.Thread(target=self._filter_worker, args=(filters,), daemon=True).start()
+
+    def start_mutation(self):
+        if self._busy:
+            return
+        values = {key: entry.get().strip() for key, entry in self.form_entries.items()}
+        if not all(values.values()):
+            self.status.set("Error: all patient fields are required.")
+            return
+        if self.mode.get() == "Update":
+            selected = self.tree.selection()
+            if not selected:
+                self.status.set("Error: select a patient to update.")
+                return
+            patient_id = self.patients[selected[0]].get("id")
+            if not patient_id:
+                self.status.set("Error: selected patient has no ID.")
+                return
+        else:
+            patient_id = None
+        self._busy = True
+        self.btn.state(["disabled"])
+        self.status.set("Saving patient …")
+        threading.Thread(target=self._mutation_worker, args=(values, patient_id), daemon=True).start()
 
     def _worker(self, query):
         try:
@@ -387,6 +424,34 @@ class Chase(tk.Tk):
         except FhirError as e:
             self.after(0, self._done, None, e)
 
+    def _filter_worker(self, filters):
+        try:
+            result = search_patients(filters)
+            self.after(0, self._done, result, None)
+        except FhirError as e:
+            self.after(0, self._done, None, e)
+
+    def _mutation_worker(self, values, patient_id):
+        try:
+            if patient_id:
+                patient = update_patient(patient_id, **values)
+                info = f"Patient/{patient_id} updated successfully"
+            else:
+                patient = create_patient(**values)
+                info = f"Patient/{patient.get('id', '?')} created successfully"
+            self.after(0, self._mutation_done, patient, info, None)
+        except FhirError as error:
+            self.after(0, self._mutation_done, None, None, error)
+
+    def _mutation_done(self, patient, info, error):
+        self._busy = False
+        self.btn.state(["!disabled"])
+        if error:
+            self.status.set(f"Error: {error}")
+            return
+        self.status.set(f"{info}. The profile and ID are shown.")
+        self._display_patients([patient])
+
     def _done(self, result, error):
         self._busy = False
         self.btn.state(["!disabled"])
@@ -394,12 +459,15 @@ class Chase(tk.Tk):
             self.status.set(f"Error: {error}")
             return
         patients, info = result
+        self._display_patients(patients)
+        self.status.set(f"{info} - {len(patients)} result(s).")
+
+    def _display_patients(self, patients):
         self.tree.delete(*self.tree.get_children())
         self.patients.clear()
         for p in patients:
             iid = self.tree.insert("", "end", text=display_name(p), values=(p.get("id", ""),))
             self.patients[iid] = p
-        self.status.set(f"{info} - {len(patients)} result(s).")
         if patients:
             first = self.tree.get_children()[0]
             self.tree.selection_set(first)
@@ -410,6 +478,7 @@ class Chase(tk.Tk):
         sel = self.tree.selection()
         if sel:
             self.show_patient(self.patients[sel[0]])
+            self._populate_update_form()
 
     def _set_json(self, data):
         self.json_box.configure(state="normal")
