@@ -1,0 +1,3 @@
+Observations erstellen und verbinden
+Patienten delete
+Resource im Verlauf darstellen. Eine Resource wie Laborwert über den Verkauf darstellen
